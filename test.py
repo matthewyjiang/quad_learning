@@ -5,6 +5,7 @@ import time
 import sys
 import os
 from sys import platform
+import torch
 import argparse
 
 # hardware reset
@@ -117,6 +118,10 @@ try:
         imageToProcess = color_image
         datum.cvInputData = imageToProcess
         opWrapper.emplaceAndPop(op.VectorDatum([datum]))
+        
+        # create a tensor from the pose keypoints
+        
+        x = torch.tensor(datum.poseKeypoints)
         
         images = np.hstack((datum.cvOutputData, depth_colormap))
 
