@@ -1,8 +1,14 @@
 import torch
+import csv
 from torch import nn
 import numpy as np
 import scipy.io
+import os
+import sys
+from sys import platform
 from datetime import datetime
+import cv2
+import pandas as pd
 
 # PyTorch TensorBoard support
 from torch.utils.tensorboard import SummaryWriter
@@ -12,6 +18,57 @@ annotations = scipy.io.loadmat('./mpii_human_pose_v1_u12_2/mpii_human_pose_v1_u1
 release = annotations['RELEASE']
 
 must_be_list_fields = ["annolist", "annorect", "point", "img_train", "single_person", "act", "video_list"]
+
+try:
+    # Import Openpose (Windows/Ubuntu/OSX)
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    try:
+        # Windows Import
+        if platform == "win32":
+            # Change these variables to point to the correct folder (Release/x64 etc.)
+            sys.path.append(dir_path + '/openpose/python/openpose/Release');
+            os.environ['PATH']  = os.environ['PATH'] + ';' + dir_path + '/../../x64/Release;' +  dir_path + '/../../bin;'
+            import pyopenpose as op
+        else:
+            # Change these variables to point to the correct folder (Release/x64 etc.)
+            #sys.path.append('./openpose/python');
+            # If you run `make install` (default path is `/usr/local/python` for Ubuntu), you can also access the OpenPose/python module from there. This will install OpenPose and the python library at your desired installation path. Ensure that this is in your python path in order to use it.
+            sys.path.append('/usr/local/python')
+            from openpose import pyopenpose as op
+    except ImportError as e:
+        print('Error: OpenPose library could not be found. Did you enable `BUILD_PYTHON` in CMake and have this Python script in the right folder?')
+        raise e
+
+    # # Flags
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--image_path", default="../../../examples/media/COCO_val2014_000000000192.jpg", help="Process an image. Read all standard formats (jpg, png, bmp, etc.).")
+    # args = parser.parse_known_args()
+
+    # Custom Params (refer to include/openpose/flags.hpp for more parameters)
+    params = dict()
+    params["model_folder"] = "../openpose/models/"
+
+    
+    # Construct it from system arguments
+    # op.init_argv(args[1])
+    # oppython = op.OpenposePython()
+
+    # Starting OpenPose
+    opWrapper = op.WrapperPython()
+    opWrapper.configure(params)
+    opWrapper.start()
+    
+except Exception as e:
+    print(e.with_traceback())
+    sys.exit(-1)
+    
+    
+    
+def get_points(img):
+    datum = op.Datum()
+    datum.cvInputData = img
+    opWrapper.emplaceAndPop(op.VectorDatum([datum]))
+    return datum.poseKeypoints[0], datum.cvOutputData
 
 def generate_dataset_obj(obj):
     if type(obj) == np.ndarray:
@@ -59,180 +116,57 @@ data = dataset_obj['annolist']
 training_data = []
 
 #generate training dataset
-
-for i in range(len(data)):
-    d = dataset_obj['annolist'][i]
-    name = d['image']['name']
-    points = [(0,0)]*15
-
-    try:
-        for p in d['annorect']:
-            if 'annopoints' in p:
-                for point in p['annopoints']['point']:
-                    if point['is_visible'] == 0:
-                        continue
-                    points[point['id']] = (point['x'], point['y'])
-        label = dataset_obj['act'][i]['act_id']
-        if dataset_obj['img_train'][i] == 0:
-            continue
-        # convert points to tensor
-        points = points.astype(np.int16)
-        training_data.append((points, label))
-        
-        
-        
-    except:
-        print("Error in {}".format(name))
-    
-    
-# generate test dataset
-
 test_data = []
 
 
 for i in range(len(data)):
     d = dataset_obj['annolist'][i]
     name = d['image']['name']
-    points = [(0,0)]*15
 
     try:
-        for p in d['annorect']:
-            if 'annopoints' in p:
-                for point in p['annopoints']['point']:
-                    if point['is_visible'] == 0:
-                        continue
-                    points[point['id']] = (point['x'], point['y'])
+        img = cv2.imread("mpii_human_pose_v1/images/"+name)
+        points, cv_output_data = get_points(img)
+        
+        # 2d image so remove the third dimension
+        
+        points = points[:, :2]
         label = dataset_obj['act'][i]['act_id']
-        if dataset_obj['img_train'][i] == 1:
-            continue
         
+        
+        # convert points to tensor
         points = points.astype(np.int16)
-        test_data.append((points, label))
+        pointsStr =  "[" + ", ".join([str(p) for p in points.flatten()]) + "]"
+        
+        if dataset_obj['img_train'][i] == 0:
+            training_data.append((name, label, pointsStr))
+            print("creating training data for {}".format(name))
+        elif dataset_obj['img_train'][i] == 1:
+            test_data.append((name, label, pointsStr))
+            print("creating test data for {}".format(name))
         
         
         
-    except:
-        print("Error in {}".format(name))
+    except Exception as e:
+        continue
+    
+    
+pd.DataFrame(training_data).to_csv('training_data1.csv', index=False)
 
+    
+# with open('training_data.csv','w') as out:
+#     csv_out=csv.writer(out)
+#     csv_out.writerows(training_data)
+
+# generate test dataset
+
+
+
+with open('test_data.csv','w') as out:
+    csv_out=csv.writer(out)
+    csv_out.writerows(test_data)
 # print(training_data)
 
 # initalize model
 
 #three leaky relu layers and a hyperbolic tangent layer
 
-class NeuralNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.flatten = nn.Flatten()
-        self.model = nn.Sequential(
-            nn.Linear(15, 100),
-            nn.LeakyReLU(),
-            nn.Linear(100, 100),
-            nn.LeakyReLU(),
-            nn.Linear(100, 100),
-            nn.LeakyReLU(),
-            nn.Linear(100, 15),
-            nn.Tanh()
-        )
-
-    def forward(self, x):
-        x = self.flatten(x)
-        logits = self.model(x)
-        return logits
-
-device = (
-    "cuda"
-    if torch.cuda.is_available()
-    else "mps"
-    if torch.backends.mps.is_available()
-    else "cpu"
-)
-print(f"Using {device} device")
-
-model = NeuralNetwork().to(device=device)
-
-# set up loss function and optimizer
-
-loss_fn = nn.MSELoss(reduction='sum')
-
-learning_rate = 1e-4
-
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
-
-# train model
-
-def train_one_epoch(epoch, model, loss_fn, optimizer, device, tb_writer):
-    running_loss = 0.0
-    last_loss = 0.0
-    
-    for (X, y) in enumerate(training_data):
-        batch+=1
-        X = X.to(device)
-        y = y.to(device)
-        
-        # Compute prediction error
-        
-        pred = model(X)
-        loss = loss_fn(pred, y)
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        if batch % 10 == 9:
-            last_loss = running_loss / 10
-            print(f"Epoch: {epoch}, Batch: {batch}, Average Loss: {last_loss}")
-            tb_x = epoch * len(training_data) + batch + 1
-            tb_writer.add_scalar("Loss/train", last_loss, tb_x)
-            running_loss = 0.0
-            
-            
-    return last_loss
-
-timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-writer = SummaryWriter('runs/fashion_trainer_{}'.format(timestamp))
-epoch_number = 0
-
-EPOCHS = 5
-
-best_vloss = 1_000_000.
-
-for epoch in range(EPOCHS):
-    print('EPOCH {}:'.format(epoch_number + 1))
-
-    # Make sure gradient tracking is on, and do a pass over the data
-    model.train(True)
-    avg_loss = train_one_epoch(epoch_number, model, loss_fn, optimizer, device, writer)
-
-
-    running_vloss = 0.0
-    # Set the model to evaluation mode, disabling dropout and using population
-    # statistics for batch normalization.
-    model.eval()
-
-    # Disable gradient computation and reduce memory consumption.
-    with torch.no_grad():
-        for i, vdata in enumerate(test_data):
-            vinputs, vlabels = vdata
-            voutputs = model(vinputs)
-            vloss = loss_fn(voutputs, vlabels)
-            running_vloss += vloss
-
-    avg_vloss = running_vloss / (i + 1)
-    print('LOSS train {} valid {}'.format(avg_loss, avg_vloss))
-
-    # Log the running loss averaged per batch
-    # for both training and validation
-    writer.add_scalars('Training vs. Validation Loss',
-                    { 'Training' : avg_loss, 'Validation' : avg_vloss },
-                    epoch_number + 1)
-    writer.flush()
-
-    # Track best performance, and save the model's state
-    if avg_vloss < best_vloss:
-        best_vloss = avg_vloss
-        model_path = 'model_{}_{}'.format(timestamp, epoch_number)
-        torch.save(model.state_dict(), model_path)
-
-    epoch_number += 1
-        
